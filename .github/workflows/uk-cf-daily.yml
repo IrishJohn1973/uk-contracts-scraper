@@ -1,0 +1,94 @@
+name: UK Contracts (CF) Ingest
+
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Results pages to archive (≈20 notices/page)"
+        default: "5"
+        required: false
+      cap:
+        description: "Max notices to stage/parse"
+        default: "500"
+        required: false
+  schedule:
+    - cron: "15 6 * * *"  # 06:15 UTC daily
+
+concurrency:
+  group: uk-cf
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PLAYWRIGHT_HEADLESS: "1"
+      HEADLESS: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Sanity check DATABASE_URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "ERROR: Missing DATABASE_URL secret on repo."
+            exit 1
+          fi
+          node -e "const u=new URL(process.env.DATABASE_URL); console.log('DB host:', u.hostname)"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "select version()"
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      # 1) Archive N results pages (captures listing HTML into RAW)
+      - name: Archive results pages
+        run: node scripts/uk_cf_archive_results.mjs ${{ inputs.pages || '5' }}
+
+      # 2) Extract notice IDs from those results and stage them
+      - name: Stage listings → STAGING
+        run: node scripts/uk_cf_listings_paged.mjs ${{ inputs.pages || '5' }} ${{ inputs.cap || '500' }}
+
+      # 3) Fetch detail HTML (gz) for staged notices
+      - name: Fetch detail HTML (gz) → RAW
+        run: node scripts/uk_cf_fetch_details_gz.mjs ${{ inputs.cap || '500' }}
+
+      # 4) Parse details into STAGING (buyer, dates, value, cpvs, nuts, etc.)
+      - name: Parse detail pages → STAGING
+        run: node scripts/uk_cf_parse_details.mjs ${{ inputs.cap || '500' }}
+
+      # 5) Ensure short_desc is clean text
+      - name: Extract clean descriptions
+        run: node scripts/uk_cf_extract_descriptions.mjs ${{ inputs.cap || '500' }}
+
+      # 6) Export a preview CSV (last 300 uk_cf)
+      - name: Export preview CSV
+        shell: bash
+        run: |
+          psql "$DATABASE_URL" -Atc "COPY (
+            SELECT uk_uid, title, buyer_name, notice_type, nuts, published_at, deadline, source_url,
+                   COALESCE(array_length(cpv_codes,1),0) AS cpv_count,
+                   LEFT(COALESCE(short_desc,''), 240) AS short_desc
+            FROM public.uk_staging_std
+            WHERE source='uk_cf'
+            ORDER BY COALESCE(published_at, ingested_at) DESC
+            LIMIT 300
+          ) TO STDOUT WITH CSV HEADER" > uk_cf_preview.csv
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uk-cf-artifacts
+          path: |
+            *.log
+            uk_cf_preview.csv
+          if-no-files-found: warn
