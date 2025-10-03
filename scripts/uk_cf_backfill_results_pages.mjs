@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { setGlobalDispatcher, Agent } from "undici";
+setGlobalDispatcher(new Agent({ connect: { rejectUnauthorized: false } }));
 // Backfill notices from Contracts Finder listings using ?page= pagination.
 // Usage: node scripts/uk_cf_backfill_results_pages.mjs 50
 import { Client } from "pg";
