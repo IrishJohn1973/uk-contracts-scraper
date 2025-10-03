@@ -1,0 +1,64 @@
+name: UK CF Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many listings to pull"
+        required: false
+        default: "10"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Run listings (limit)
+        run: node scripts/uk_cf_listings.mjs "${{ inputs.limit || '10' }}"
+
+      - name: Backfill details (same limit)
+        run: node scripts/uk_cf_backfill_details.mjs "${{ inputs.limit || '10' }}"
+
+      - name: Export CSV (latest 200)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGSSLMODE=require psql "$DATABASE_URL" -Atc "
+          COPY (
+            SELECT
+              uk_uid,
+              LEFT(COALESCE(title,''),200)       AS title,
+              buyer_name,
+              notice_type,
+              nuts,
+              published_at,
+              deadline,
+              source_url,
+              COALESCE(array_length(cpv_codes,1),0) AS cpv_count,
+              LEFT(COALESCE(short_desc,''),240)  AS short_desc
+            FROM public.uk_staging_std
+            WHERE source='uk_cf'
+            ORDER BY ingested_at DESC
+            LIMIT 200
+          ) TO STDOUT WITH CSV HEADER" > uk_cf_latest.csv
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uk_cf_latest
+          path: uk_cf_latest.csv
+          if-no-files-found: error
