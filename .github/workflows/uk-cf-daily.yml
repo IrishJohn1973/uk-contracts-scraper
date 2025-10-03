@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       pages:
-        description: "Results pages to archive (≈20 notices/page)"
-        default: "5"
+        description: "How many results pages"
         required: false
+        default: "20"
       cap:
-        description: "Max notices to stage/parse"
-        default: "500"
+        description: "Max notices to process"
         required: false
+        default: "1500"
   schedule:
-    - cron: "15 6 * * *"  # 06:15 UTC daily
+    - cron: "30 6 * * *"
 
 concurrency:
   group: uk-cf
