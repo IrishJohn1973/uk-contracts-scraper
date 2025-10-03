@@ -1,21 +1,22 @@
-name: UK Contracts (CF) Ingest
+name: UK Contracts (daily)
 
 on:
+  schedule:
+    # 07:15 UTC every day (08:15 Dublin during summer time)
+    - cron: "15 7 * * *"
   workflow_dispatch:
     inputs:
       pages:
-        description: "How many results pages"
+        description: "How many listing pages to scan (via ?page=)"
         required: false
-        default: "20"
-      cap:
-        description: "Max notices to process"
+        default: "50"
+      max_details:
+        description: "Cap on detail pages to fetch/parse"
         required: false
-        default: "1500"
-  schedule:
-    - cron: "30 6 * * *"
+        default: "5000"
 
 concurrency:
-  group: uk-cf
+  group: uk-cf-daily
   cancel-in-progress: false
 
 jobs:
@@ -24,8 +25,8 @@ jobs:
     timeout-minutes: 180
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      PLAYWRIGHT_HEADLESS: "1"
-      HEADLESS: "true"
+      PAGES: ${{ inputs.pages || '50' }}
+      MAX_DETAILS: ${{ inputs.max_details || '5000' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +37,7 @@ jobs:
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      - name: Sanity check DATABASE_URL
+      - name: Sanity check DB
         shell: bash
         run: |
           set -euo pipefail
@@ -45,50 +46,69 @@ jobs:
             exit 1
           fi
           node -e "const u=new URL(process.env.DATABASE_URL); console.log('DB host:', u.hostname)"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "select version()"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "select version();"
 
-      - name: Install deps
-        run: npm ci || npm install
+      - name: Install npm deps
+        run: npm ci
 
-      # 1) Archive N results pages (captures listing HTML into RAW)
+      # Crawl & backfill recent listings (yesterday coverage comes from early pages; idempotent)
       - name: Archive results pages
-        run: node scripts/uk_cf_archive_results.mjs ${{ inputs.pages || '5' }}
+        run: node scripts/uk_cf_archive_results.mjs "$PAGES" | tee uk_cf_archive_results.log
 
-      # 2) Extract notice IDs from those results and stage them
-      - name: Stage listings → STAGING
-        run: node scripts/uk_cf_listings_paged.mjs ${{ inputs.pages || '5' }} ${{ inputs.cap || '500' }}
+      - name: Backfill from listing pages (?page=)
+        run: node scripts/uk_cf_backfill_results_pages.mjs "$PAGES" | tee uk_cf_backfill_results_pages.log
 
-      # 3) Fetch detail HTML (gz) for staged notices
-      - name: Fetch detail HTML (gz) → RAW
-        run: node scripts/uk_cf_fetch_details_gz.mjs ${{ inputs.cap || '500' }}
+      # Fetch detail HTML into RAW, then extract descriptions and parse
+      - name: Fetch detail HTML (gz)
+        run: node scripts/uk_cf_fetch_details_gz.mjs "$MAX_DETAILS" | tee uk_cf_fetch_details_gz.log
 
-      # 4) Parse details into STAGING (buyer, dates, value, cpvs, nuts, etc.)
-      - name: Parse detail pages → STAGING
-        run: node scripts/uk_cf_parse_details.mjs ${{ inputs.cap || '500' }}
+      - name: Extract descriptions
+        run: node scripts/uk_cf_extract_descriptions.mjs "$MAX_DETAILS" | tee uk_cf_extract_descriptions.log
 
-      # 5) Ensure short_desc is clean text
-      - name: Extract clean descriptions
-        run: node scripts/uk_cf_extract_descriptions.mjs ${{ inputs.cap || '500' }}
+      - name: Link staging.raw_id from latest RAW detail
+        shell: bash
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+          WITH latest_detail AS (
+            SELECT DISTINCT ON (source_id) source_id, raw_id, inserted_at
+            FROM public.uk_raw_std
+            WHERE source='uk_cf' AND kind='detail' AND url LIKE '%/notice/%'
+            ORDER BY source_id, inserted_at DESC
+          )
+          UPDATE public.uk_staging_std s
+          SET raw_id = d.raw_id
+          FROM latest_detail d
+          WHERE s.source='uk_cf' AND s.raw_id IS NULL AND s.source_id = d.source_id;
+          "
 
-      # 6) Export a preview CSV (last 300 uk_cf)
-      - name: Export preview CSV
+      - name: Parse details (enhanced)
+        run: node scripts/uk_cf_parse_details_enhanced.mjs "$MAX_DETAILS" | tee uk_cf_parse_details_enhanced.log
+
+      - name: Export preview CSV (last 300 by published_at/deadline)
         shell: bash
         run: |
           psql "$DATABASE_URL" -Atc "COPY (
-            SELECT uk_uid, title, buyer_name, notice_type, nuts, published_at, deadline, source_url,
+            SELECT uk_uid,
+                   title,
+                   buyer_name,
+                   notice_type,
+                   nuts,
+                   published_at,
+                   deadline,
                    COALESCE(array_length(cpv_codes,1),0) AS cpv_count,
-                   LEFT(COALESCE(short_desc,''), 240) AS short_desc
+                   LEFT(COALESCE(short_desc,''), 240) AS short_desc_preview,
+                   source_url
             FROM public.uk_staging_std
             WHERE source='uk_cf'
-            ORDER BY COALESCE(published_at, ingested_at) DESC
+            ORDER BY COALESCE(published_at, deadline, now()) DESC
             LIMIT 300
-          ) TO STDOUT WITH CSV HEADER" > uk_cf_preview.csv
+          ) TO STDOUT WITH CSV HEADER" > uk_cf_latest.csv
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: uk-cf-artifacts
+          name: uk-cf-daily-artifacts
           path: |
             *.log
-            uk_cf_preview.csv
+            uk_cf_latest.csv
           if-no-files-found: warn
