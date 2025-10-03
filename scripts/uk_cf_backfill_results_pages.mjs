@@ -1,3 +1,4 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 #!/usr/bin/env node
 import { setGlobalDispatcher, Agent } from "undici";
 setGlobalDispatcher(new Agent({ connect: { rejectUnauthorized: false } }));
