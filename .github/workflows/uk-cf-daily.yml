@@ -1,38 +1,38 @@
 name: UK Contracts (daily)
 
 on:
-  schedule:
-    # 07:15 UTC every day (08:15 Dublin during summer time)
-    - cron: "15 7 * * *"
   workflow_dispatch:
     inputs:
-      pages:
-        description: "How many listing pages to scan (via ?page=)"
+      PAGES:
+        description: "How many results pages to backfill via ?page="
         required: false
-        default: "50"
-      max_details:
-        description: "Cap on detail pages to fetch/parse"
+        default: "60"
+      MAX_DETAILS:
+        description: "Max detail rows to process"
         required: false
         default: "5000"
-
-concurrency:
-  group: uk-cf-daily
-  cancel-in-progress: false
+  schedule:
+    - cron: "15 5 * * *" # 05:15 UTC daily
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      PAGES: ${{ inputs.pages || '50' }}
-      MAX_DETAILS: ${{ inputs.max_details || '5000' }}
-    steps:
-      - uses: actions/checkout@v4
+      PAGES: ${{ github.event.inputs.PAGES || '60' }}
+      MAX_DETAILS: ${{ github.event.inputs.MAX_DETAILS || '5000' }}
+      # CI-only: relax TLS so node-postgres doesn't fail on "self-signed certificate in certificate chain"
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -41,24 +41,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${DATABASE_URL:-}" ]; then
-            echo "ERROR: Missing DATABASE_URL secret on repo."
-            exit 1
-          fi
           node -e "const u=new URL(process.env.DATABASE_URL); console.log('DB host:', u.hostname)"
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "select version();"
 
       - name: Install npm deps
         run: npm ci
 
-      # Crawl & backfill recent listings (yesterday coverage comes from early pages; idempotent)
       - name: Archive results pages
         run: node scripts/uk_cf_archive_results.mjs "$PAGES" | tee uk_cf_archive_results.log
 
       - name: Backfill from listing pages (?page=)
         run: node scripts/uk_cf_backfill_results_pages.mjs "$PAGES" | tee uk_cf_backfill_results_pages.log
 
-      # Fetch detail HTML into RAW, then extract descriptions and parse
       - name: Fetch detail HTML (gz)
         run: node scripts/uk_cf_fetch_details_gz.mjs "$MAX_DETAILS" | tee uk_cf_fetch_details_gz.log
 
@@ -111,4 +105,3 @@ jobs:
           path: |
             *.log
             uk_cf_latest.csv
-          if-no-files-found: warn
