@@ -1,5 +1,5 @@
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 #!/usr/bin/env node
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 import { setGlobalDispatcher, Agent } from "undici";
 setGlobalDispatcher(new Agent({ connect: { rejectUnauthorized: false } }));
 // Backfill notices from Contracts Finder listings using ?page= pagination.
