@@ -6,11 +6,11 @@ on:
       PAGES:
         description: "How many results pages to backfill via ?page="
         required: false
-        default: "60"
+        default: "10"
       MAX_DETAILS:
         description: "Max detail rows to process"
         required: false
-        default: "5000"
+        default: "2000"
   schedule:
     - cron: "15 5 * * *" # 05:15 UTC daily
 
