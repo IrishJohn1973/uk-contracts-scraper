@@ -47,7 +47,7 @@ async function main() {
            'UK'
          WHERE NOT EXISTS (
            SELECT 1 FROM public.uk_staging_std s
-           WHERE s.source = 'uk_cf' AND s.source_id = $1
+           WHERE s.source = 'uk_cf' AND s.source_id = $1::text
          )`,
         [id]
       );
