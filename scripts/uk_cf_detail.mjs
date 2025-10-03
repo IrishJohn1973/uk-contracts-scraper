@@ -1,5 +1,6 @@
 import { Client } from 'pg';
 import { request } from 'undici';
+import { gzipSync } from 'node:zlib';
 
 const SRC = 'uk_cf';
 const BASE = 'https://www.contractsfinder.service.gov.uk';
@@ -18,8 +19,7 @@ function extractTitle(html) {
   return m ? m[1].trim() : '(no title)';
 }
 function descr(html) {
-  const txt = html.replace(/\s+/g,' ').slice(0,240);
-  return txt;
+  return html.replace(/\s+/g,' ').slice(0,240);
 }
 
 (async () => {
@@ -28,15 +28,16 @@ function descr(html) {
     const res = await request(DETAIL, { method: 'GET' });
     const status = res.statusCode;
     const html = await res.body.text();
+    const html_gz = gzipSync(Buffer.from(html));
 
-    // Insert RAW detail
+    // Insert RAW detail with gzipped HTML body
     const { rows: [rawRow] } = await pg.query(`
       INSERT INTO public.uk_raw_std
-        (source,  source_id, url,    kind,     mime,       status_code, attachments, content_hash, notes)
+        (source,  source_id, url,    kind,     mime,       status_code, attachments, html_gz,       content_hash, notes)
       VALUES
-        ($1,      $2,        $3,     'detail', 'text/html', $4,         '{}'::jsonb, NULL,         'detail fetch')
+        ($1,      $2,        $3,     'detail', 'text/html', $4,         '{}'::jsonb, $5,            NULL,         'detail fetch')
       RETURNING raw_id
-    `, [SRC, sid, DETAIL, status]);
+    `, [SRC, sid, DETAIL, status, html_gz]);
 
     const title = extractTitle(html);
     const short_desc = descr(html);

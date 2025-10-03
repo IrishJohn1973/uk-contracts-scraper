@@ -1,5 +1,6 @@
 import { Client } from 'pg';
 import { request } from 'undici';
+import { gzipSync } from 'node:zlib';
 
 const SRC = 'uk_cf';
 const BASE = 'https://www.contractsfinder.service.gov.uk';
@@ -35,14 +36,15 @@ function descr(html) {
       const res = await request(url, { method: 'GET' });
       const status = res.statusCode;
       const html = await res.body.text();
+      const html_gz = gzipSync(Buffer.from(html));
 
       const { rows: [rawRow] } = await pg.query(`
         INSERT INTO public.uk_raw_std
-          (source,  source_id, url,  kind,     mime,       status_code, attachments, content_hash, notes)
+          (source,  source_id, url,  kind,     mime,       status_code, attachments, html_gz,       content_hash, notes)
         VALUES
-          ($1,      $2,        $3,   'detail', 'text/html', $4,         '{}'::jsonb, NULL,         'backfill detail')
+          ($1,      $2,        $3,   'detail', 'text/html', $4,         '{}'::jsonb, $5,            NULL,         'backfill detail (gz)')
         RETURNING raw_id
-      `, [SRC, sid, url, status]);
+      `, [SRC, sid, url, status, html_gz]);
 
       const title = extractTitle(html);
       const short_desc = descr(html);
@@ -56,7 +58,7 @@ function descr(html) {
       ok++;
     }
 
-    console.log('OK → backfilled details for', ok, 'items');
+    console.log('OK → backfilled details (gz) for', ok, 'items');
   } catch (e) {
     console.error('ERROR →', e.message);
     process.exit(2);
